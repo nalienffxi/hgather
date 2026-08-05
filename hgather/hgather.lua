@@ -22,7 +22,7 @@
 
 addon.name      = 'hgather';
 addon.author    = 'Hastega, rewritten by Claude';
-addon.version   = '2.2';
+addon.version   = '2.3';
 addon.desc      = 'Chocobo digging tracker: yields, rental gil, JST-day sessions on disk.';
 addon.link      = 'https://github.com/SlowedHaste/HGather';
 addon.commands  = {'/hgather'};
@@ -39,6 +39,39 @@ local JST_OFFSET = 9 * 3600;
 -- Settings
 ------------------------------------------------------------
 local DEFAULT_PRICE_URL = 'https://raw.githubusercontent.com/nalienffxi/hgather/main/data/prices.json';
+
+------------------------------------------------------------
+-- Digging ranks (HorizonXI)
+--
+-- Ranks follow the crafting pattern: a new rank every 10 skill levels.
+-- Each rank grants +10 to the daily item limit, and reduces the delay
+-- between digs and the cooldown after zoning.
+--   https://horizonffxi.wiki/Chocobo_Digging
+--
+-- The daily limit counts ITEMS DUG, not attempts, and resets at JP midnight
+-- -- the same boundary this addon already uses for a session.
+------------------------------------------------------------
+local RANKS = T{
+    { name = 'Amateur',    skill =   0, limit = 100, area_delay = 60, dig_delay = 16 },
+    { name = 'Recruit',    skill =  10, limit = 110, area_delay = 55, dig_delay = 11 },
+    { name = 'Initiate',   skill =  20, limit = 120, area_delay = 50, dig_delay =  6 },
+    { name = 'Novice',     skill =  30, limit = 130, area_delay = 45, dig_delay =  1 },
+    { name = 'Apprentice', skill =  40, limit = 140, area_delay = 40, dig_delay =  0 },
+    { name = 'Journeyman', skill =  50, limit = 150, area_delay = 35, dig_delay =  0 },
+    { name = 'Craftsman',  skill =  60, limit = 160, area_delay = 30, dig_delay =  0 },
+    { name = 'Artisan',    skill =  70, limit = 170, area_delay = 25, dig_delay =  0 },
+    { name = 'Adept',      skill =  80, limit = 180, area_delay = 20, dig_delay =  0 },
+    { name = 'Veteran',    skill =  90, limit = 190, area_delay = 15, dig_delay =  0 },
+    { name = 'Expert',     skill = 100, limit = 200, area_delay = 10, dig_delay =  0 },
+};
+
+local function rank_for_skill(skill)
+    local rank = RANKS[1];
+    for _, r in ipairs(RANKS) do
+        if (skill >= r.skill) then rank = r; end
+    end
+    return rank;
+end
 
 local default_settings = T{
     -- Bumped by migrate_settings() after it runs. The default stays at 1 on
@@ -64,6 +97,13 @@ local default_settings = T{
     -- to anyone. No account, key, or private service is involved.
     price_url       = T{ DEFAULT_PRICE_URL },
     price_auto      = T{ true },   -- refresh the snapshot once per session
+
+    -- Digging skill. Set by hand to whatever you believe your level is; a
+    -- skill-up message overrides it with the real number, since the message
+    -- states the resulting level outright.
+    dig_skill       = T{ 0.0 },
+    dig_skill_proven = false,      -- true once a skill-up confirmed the level
+    digs_left_show  = T{ true },
 
     -- Current JST-day session, kept in settings so it survives reloads and
     -- game restarts within the same Vana'diel day. Disk files are the export.
@@ -365,6 +405,19 @@ local function append_event(evt)
     hgather.event_buf = T{ };
 end
 
+-- Items dug today vs the rank's daily allowance.
+--
+-- Approximate by nature: high ranks occasionally get a free dig, Blue Race
+-- Silks skip the counter about half the time, and Goblin Digger items are
+-- exempt -- so the real allowance tends to stretch a little further than this.
+-- It also only counts digs this addon saw; dig before loading it and the
+-- figure runs high.
+local function digs_remaining()
+    local rank = rank_for_skill(hgather.settings.dig_skill[1]);
+    local used = hgather.settings.session.dig_items;
+    return math.max(0, rank.limit - used), rank.limit, rank, used;
+end
+
 local function session_totals()
     local sess = hgather.settings.session;
     local greens = sess.dig_tries * hgather.settings.gysahl_cost[1];
@@ -411,6 +464,12 @@ local function write_summary(end_reason)
     f:write('  "dig_items": ' .. string.format('%d', sess.dig_items) .. ',\n');
     f:write('  "accuracy_pct": ' .. string.format('%.2f', accuracy) .. ',\n');
     f:write('  "skillups": ' .. string.format('%.1f', sess.skillups) .. ',\n');
+    local left, limit, rank = digs_remaining();
+    f:write('  "dig_skill": ' .. string.format('%.1f', hgather.settings.dig_skill[1]) .. ',\n');
+    f:write('  "dig_skill_proven": ' .. tostring(hgather.settings.dig_skill_proven == true) .. ',\n');
+    f:write('  "rank": "' .. json_escape(rank.name) .. '",\n');
+    f:write('  "daily_limit": ' .. string.format('%d', limit) .. ',\n');
+    f:write('  "digs_remaining": ' .. string.format('%d', left) .. ',\n');
     f:write('  "rentals": ' .. string.format('%d', sess.rentals) .. ',\n');
     f:write('  "chocobo_gil_paid": ' .. string.format('%d', sess.gil_paid) .. ',\n');
     f:write('  "greens_cost_each": ' .. string.format('%d', hgather.settings.gysahl_cost[1]) .. ',\n');
@@ -668,6 +727,10 @@ local function print_report()
     print(chat.header(addon.name):append(chat.message(string.format(
         'Digs: %d (%.1f/min) | Items: %d | Acc: %.1f%%',
         sess.dig_tries, hgather.dig_per_minute, sess.dig_items, accuracy))));
+    local left, limit, rank = digs_remaining();
+    print(chat.header(addon.name):append(chat.message(string.format(
+        'Rank: %s (skill %.1f) | Digs left today: %d / %d',
+        rank.name, hgather.settings.dig_skill[1], left, limit))));
     print(chat.header(addon.name):append(chat.message(
         'Greens: ' .. format_int(greens) .. 'g | Chocobo rentals: ' .. sess.rentals ..
         ' (' .. format_int(sess.gil_paid) .. 'g)')));
@@ -1201,6 +1264,21 @@ local function render_overlay()
         imgui.Text(string.format('%d', sess.dig_items)); imgui.NextColumn();
         imgui.Text('Accuracy:'); imgui.NextColumn();
         imgui.TextColored(CYAN, string.format('%.1f%%', accuracy)); imgui.NextColumn();
+        if (hgather.settings.digs_left_show[1]) then
+            local left, limit, rank = digs_remaining();
+            local frac = (limit > 0) and (left / limit) or 0;
+            local col = GREEN;
+            if (left == 0) then col = RED; elseif (frac <= 0.15) then col = { 1.0, 0.7, 0.25, 1.0 }; end
+            imgui.Text('Digs left:'); imgui.NextColumn();
+            imgui.TextColored(col, string.format('%d / %d', left, limit));
+            if (imgui.IsItemHovered()) then
+                imgui.SetTooltip(string.format(
+                    '%s (skill %.1f)%s\nDaily limit resets at JP midnight.\nApproximate: free digs and Blue Race Silks\nmay stretch this further.',
+                    rank.name, hgather.settings.dig_skill[1],
+                    hgather.settings.dig_skill_proven and '' or ' - unconfirmed, set it in /hgather'));
+            end
+            imgui.NextColumn();
+        end
         if (hgather.settings.skillup_display[1] and sess.skillups > 0) then
             imgui.Text('Skillups:'); imgui.NextColumn();
             imgui.TextColored(GREEN, string.format('%.1f', sess.skillups)); imgui.NextColumn();
@@ -1320,6 +1398,28 @@ local function render_editor()
         imgui.ShowHelp('Toggles if moon phase / percent is shown.');
         imgui.Checkbox('Digging Skillups', hgather.settings.skillup_display);
         imgui.ShowHelp('Toggles if digging skillups are shown.');
+
+        imgui.Separator();
+        imgui.TextColored(GOLD, 'Digging Rank');
+        imgui.Checkbox('Show Digs Remaining', hgather.settings.digs_left_show);
+        imgui.ShowHelp('Shows items dug today against the daily limit for your rank.');
+        if (imgui.SliderFloat('Skill Level', hgather.settings.dig_skill, 0.0, 100.0, '%.1f')) then
+            -- Hand-set values are a guess until a skill-up proves otherwise.
+            hgather.settings.dig_skill_proven = false;
+        end
+        imgui.ShowHelp('Set this to roughly your digging skill. A skill-up message will correct it automatically.');
+        do
+            local left, limit, rank, used = digs_remaining();
+            imgui.Text(('Rank: %s   Daily limit: %d   Dug today: %d   Left: %d')
+                :fmt(rank.name, limit, used, left));
+            if (hgather.settings.dig_skill_proven) then
+                imgui.TextColored(GREEN, 'Skill confirmed by a skill-up message.');
+            else
+                imgui.TextColored(GRAY, 'Skill unconfirmed - it will self-correct on your next skill-up.');
+            end
+            imgui.TextColored(GRAY, ('Dig delay %ds, zone delay %ds at this rank.')
+                :fmt(rank.dig_delay, rank.area_delay));
+        end
 
         imgui.Separator();
         imgui.TextColored(GOLD, 'Gil');
@@ -1489,8 +1589,24 @@ ashita.events.register('text_in', 'text_in_cb', function (e)
         ensure_session();
         local sess = hgather.settings.session;
         sess.skillups = sess.skillups + tonumber(skill_up);
+
+        -- The message states the level it rose TO, which is better evidence
+        -- than whatever the player typed in. Take it and stop asking.
+        local level = tonumber(message:match('raising it to (%d+%.?%d*)') or '');
+        local before = hgather.settings.dig_skill[1];
+        if (level ~= nil and level > 0) then
+            hgather.settings.dig_skill[1] = level;
+            hgather.settings.dig_skill_proven = true;
+            local old_rank, new_rank = rank_for_skill(before), rank_for_skill(level);
+            if (new_rank.name ~= old_rank.name) then
+                print(chat.header(addon.name):append(chat.message(
+                    ('Rank up: %s (skill %.1f) -- daily limit now %d items.')
+                        :fmt(new_rank.name, level, new_rank.limit))));
+            end
+        end
+
         mark_event();
-        append_event({ e = 'skillup', amount = tonumber(skill_up) });
+        append_event({ e = 'skillup', amount = tonumber(skill_up), skill = hgather.settings.dig_skill[1] });
     end
 
     -- Only trust results arriving within 60s of an actual dig packet;

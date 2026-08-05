@@ -26,6 +26,18 @@ To load it automatically, add `/addon load hgather` to
   `/hgather rental <gil>`.
 - **Sessions on the JP daily reset.** A session runs to 00:00 JST, survives
   reloads and game restarts, then archives itself and starts fresh.
+- **Digs remaining.** Shows items dug today against your rank's daily limit
+  (100 at Amateur, +10 per rank, 200 at Expert — see
+  [the wiki](https://horizonffxi.wiki/Chocobo_Digging)). Set your skill level by
+  hand in `/hgather`; a skill-up message states the level it rose *to*, so the
+  addon takes that number and corrects itself, announcing any rank-up. Both the
+  limit and the addon's sessions reset at JP midnight, so the counter lines up
+  with the game's.
+
+  It is an estimate, and biased low: high ranks occasionally get a free dig,
+  Blue Race Silks skip the counter about half the time, and Goblin Digger items
+  are exempt — so you can usually dig a little past zero. It also only counts
+  digs the addon saw; dig before loading it and the number reads high.
 - **Session browser** (`/hgather sessions`) — all-time totals, a switchable bar
   chart across sessions (Net / Value / Digs / Items / Acc% / Chocobo gil), and
   per-session detail with a digs-by-hour histogram and a cumulative net-gil line.
