@@ -22,7 +22,7 @@
 
 addon.name      = 'hgather';
 addon.author    = 'Hastega, rewritten by Claude';
-addon.version   = '2.1';
+addon.version   = '2.2';
 addon.desc      = 'Chocobo digging tracker: yields, rental gil, JST-day sessions on disk.';
 addon.link      = 'https://github.com/SlowedHaste/HGather';
 addon.commands  = {'/hgather'};
@@ -38,7 +38,14 @@ local JST_OFFSET = 9 * 3600;
 ------------------------------------------------------------
 -- Settings
 ------------------------------------------------------------
+local DEFAULT_PRICE_URL = 'https://raw.githubusercontent.com/nalienffxi/hgather/main/data/prices.json';
+
 local default_settings = T{
+    -- Bumped by migrate_settings() after it runs. The default stays at 1 on
+    -- purpose: the settings loader fills in missing keys from the defaults, so
+    -- a default of 2 would make an unmigrated file look already-migrated.
+    settings_version = 1,
+
     visible         = T{ true },
     opacity         = T{ 0.80 },
     moon_display    = T{ true },
@@ -55,7 +62,7 @@ local default_settings = T{
     -- Public price snapshot. This is a static file on a neutral host: it holds
     -- nothing but "item id -> gil" for dig yields, so the URL is safe to ship
     -- to anyone. No account, key, or private service is involved.
-    price_url       = T{ 'https://raw.githubusercontent.com/nalienffxi/hgather/main/data/prices.json' },
+    price_url       = T{ DEFAULT_PRICE_URL },
     price_auto      = T{ true },   -- refresh the snapshot once per session
 
     -- Current JST-day session, kept in settings so it survives reloads and
@@ -173,6 +180,27 @@ local function normalize_item(raw)
         if (hit ~= nil) then return hit.name, hit.id; end
     end
     return s, nil;
+end
+
+-- One-time upgrades of an already-saved settings file. The loader never
+-- overwrites a value that is already present, so a changed default alone does
+-- nothing for existing installs -- upgrades have to be done explicitly here.
+local function migrate_settings()
+    local version = tonumber(hgather.settings.settings_version) or 1;
+    if (version >= 2) then return; end
+
+    -- v1 pointed price_url at a live API host and built the request path in
+    -- Lua. v2 reads a single static snapshot file, so an old host-only value
+    -- would fetch a web page and fail as malformed.
+    local url = tostring(hgather.settings.price_url[1] or '');
+    if (not url:lower():match('%.json$')) then
+        hgather.settings.price_url[1] = DEFAULT_PRICE_URL;
+        print(chat.header(addon.name):append(chat.message(
+            'Snapshot URL upgraded to the static price file.')));
+    end
+
+    hgather.settings.settings_version = 2;
+    settings.save();
 end
 
 local function seed_item_index()
@@ -452,7 +480,11 @@ local function fetch_prices()
     -- generated_at/item_count can never be mistaken for an item id.
     local items_block = body:match('"items"%s*:%s*{(.*)}');
     if (items_block == nil) then
-        print(chat.header(addon.name):append(chat.error('Price snapshot malformed; keeping current prices.')));
+        print(chat.header(addon.name):append(chat.error(
+            'Snapshot URL did not return a price file; keeping current prices.')));
+        print(chat.header(addon.name):append(chat.message(
+            'Expected a JSON snapshot. Check Snapshot URL in /hgather -- it should be:')));
+        print(chat.header(addon.name):append(chat.color1(6, '  ' .. DEFAULT_PRICE_URL)));
         return;
     end
 
@@ -1242,6 +1274,21 @@ local function render_editor()
     if (imgui.Begin('HGather Config', hgather.editor_open)) then
         draw_ffxi_backdrop();
 
+        -- The tracker has its own close button, and it auto-hides on idle, so
+        -- the config window needs a way back to it.
+        if (imgui.Button(hgather.settings.visible[1] and 'Hide Tracker' or 'Show Tracker')) then
+            hgather.settings.visible[1] = not hgather.settings.visible[1];
+            hgather.last_attempt = ashita.time.clock()['ms'];  -- restart the idle timer
+        end
+        imgui.ShowHelp('Show or hide the tracker overlay. Same as /hgather show.');
+        imgui.SameLine();
+        if (imgui.Button('Sessions')) then
+            hgather.browser.open[1] = not hgather.browser.open[1];
+        end
+        imgui.ShowHelp('Open the session browser with history and graphs.');
+
+        imgui.Separator();
+
         if (imgui.Button('Save Settings')) then
             update_pricing();
             settings.save();
@@ -1322,6 +1369,7 @@ settings.register('settings', 'settings_update', function (s)
     hgather.data_dir = nil;  -- character may have changed
     hgather.browser.sessions = nil;
     hgather.browser.details = T{ };
+    migrate_settings();
     seed_item_index();
     update_pricing();
     ensure_session();
@@ -1329,6 +1377,7 @@ settings.register('settings', 'settings_update', function (s)
 end);
 
 ashita.events.register('load', 'load_cb', function ()
+    migrate_settings();
     seed_item_index();
     update_pricing();
     ensure_session();
