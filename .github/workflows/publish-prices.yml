@@ -1,0 +1,44 @@
+name: Publish price snapshot
+
+# Refreshes data/prices.json from the upstream price API and commits it if the
+# numbers moved. The API URL lives in the PRICE_API repository secret, so it is
+# never committed and never reaches addon users.
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # hourly, off the hour to dodge peak load
+  workflow_dispatch:        # manual "Run workflow" button
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-prices
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build snapshot
+        env:
+          PRICE_API: ${{ secrets.PRICE_API }}
+        run: node scripts/build-prices.mjs
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- data/prices.json; then
+            echo "Prices unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name  "hgather-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/prices.json
+          git commit -m "Refresh price snapshot ($(date -u +%Y-%m-%dT%H:%MZ))"
+          git push
