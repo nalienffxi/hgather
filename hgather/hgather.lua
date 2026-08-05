@@ -22,7 +22,7 @@
 
 addon.name      = 'hgather';
 addon.author    = 'Hastega, rewritten by Claude';
-addon.version   = '2.3';
+addon.version   = '2.4';
 addon.desc      = 'Chocobo digging tracker: yields, rental gil, JST-day sessions on disk.';
 addon.link      = 'https://github.com/SlowedHaste/HGather';
 addon.commands  = {'/hgather'};
@@ -302,6 +302,20 @@ end
 
 local function get_zone_id()
     return AshitaCore:GetMemoryManager():GetParty():GetMemberZone(0);
+end
+
+-- Zone names are resolved once and cached. The resource strings are ShiftJIS,
+-- but every chocobo digging zone has a pure-ASCII name, where ShiftJIS and
+-- UTF-8 are byte-identical -- so no converter is needed. (Ashita ships none in
+-- libs; the ShiftJIS helper other addons use lives inside their own folders.)
+local zone_names = { };
+local function zone_name(id)
+    if (id == nil or id < 0) then return 'Unknown'; end
+    if (zone_names[id] ~= nil) then return zone_names[id]; end
+    local name = AshitaCore:GetResourceManager():GetString('zones.names', id);
+    if (name == nil or #name == 0) then name = 'Zone ' .. tostring(id); end
+    zone_names[id] = name;
+    return name;
 end
 
 local function get_gil()
@@ -900,29 +914,60 @@ local function load_detail(date)
     local f = io.open(dir .. '\\' .. date .. '.jsonl', 'r');
     if (f == nil) then return nil; end
 
-    local d = { hours = { }, cum = T{ }, loaded_at = os.clock() };
+    local d = { hours = { }, cum = T{ }, zones = { }, loaded_at = os.clock() };
     for i = 0, 23 do d.hours[i] = 0; end
     local run = 0;
     local green = hgather.settings.gysahl_subtract[1] and hgather.settings.gysahl_cost[1] or 0;
 
+    -- Only the gap between two consecutive digs in the SAME zone counts as
+    -- time spent there, so travelling between zones is never billed to either.
+    -- Gaps longer than this are breaks, not digging.
+    local IDLE_CAP = 180;
+    local prev_t, prev_zone = nil, nil;
+
+    local function zone_bucket(id)
+        if (d.zones[id] == nil) then
+            d.zones[id] = { id = id, digs = 0, items = 0, value = 0, rentals = 0, seconds = 0 };
+        end
+        return d.zones[id];
+    end
+
     for line in f:lines() do
         local ev = line:match('"e":%s*"(.-)"');
         local t = tonumber(line:match('"t":%s*(%d+)'));
+        local zone = tonumber(line:match('"zone":%s*(%d+)'));
         if (ev == 'clear') then
             for i = 0, 23 do d.hours[i] = 0; end
             d.cum = T{ };
+            d.zones = { };
             run = 0;
+            prev_t, prev_zone = nil, nil;
         elseif (ev == 'dig' and t ~= nil) then
             local hour = math.floor(((t + JST_OFFSET) % 86400) / 3600);
             d.hours[hour] = d.hours[hour] + 1;
             run = run - green;
+
+            local z = zone_bucket(zone or -1);
+            z.digs = z.digs + 1;
+            if (prev_t ~= nil and prev_zone == (zone or -1)) then
+                local delta = t - prev_t;
+                if (delta > 0 and delta <= IDLE_CAP) then z.seconds = z.seconds + delta; end
+            end
+            prev_t, prev_zone = t, (zone or -1);
+
             local item = line:match('"item":%s*"(.-)"');
-            if (item ~= nil and hgather.pricing[item] ~= nil) then
-                run = run + hgather.pricing[item];
+            if (item ~= nil) then
+                z.items = z.items + 1;
+                if (hgather.pricing[item] ~= nil) then
+                    run = run + hgather.pricing[item];
+                    z.value = z.value + hgather.pricing[item];
+                end
             end
             d.cum:append(run);
         elseif (ev == 'rental') then
-            run = run - (tonumber(line:match('"gil":%s*(%d+)')) or 0);
+            local gil = tonumber(line:match('"gil":%s*(%d+)')) or 0;
+            run = run - gil;
+            if (zone ~= nil) then zone_bucket(zone).rentals = zone_bucket(zone).rentals + gil; end
             d.cum:append(run);
         end
     end
@@ -1057,6 +1102,113 @@ local function draw_line_graph(points, height)
 end
 
 ------------------------------------------------------------
+-- Zone breakdown
+------------------------------------------------------------
+
+-- Net gil for a zone bucket: item value less greens and any rentals paid there.
+local function zone_net(z)
+    local green = hgather.settings.gysahl_subtract[1] and hgather.settings.gysahl_cost[1] or 0;
+    return z.value - (z.digs * green) - z.rentals;
+end
+
+local function zone_rows(zones)
+    local rows = T{ };
+    for _, z in pairs(zones) do
+        local net = zone_net(z);
+        rows:append({
+            id      = z.id,
+            name    = zone_name(z.id),
+            digs    = z.digs,
+            items   = z.items,
+            value   = z.value,
+            net     = net,
+            seconds = z.seconds,
+            acc     = (z.digs > 0) and (z.items / z.digs * 100) or 0,
+            -- Needs a real stretch of digging before a rate means anything.
+            gph     = (z.seconds >= 60) and (net / z.seconds * 3600) or nil,
+        });
+    end
+    table.sort(rows, function (a, b)
+        if (a.gph ~= nil and b.gph ~= nil) then return a.gph > b.gph; end
+        if (a.gph ~= nil) then return true; end
+        if (b.gph ~= nil) then return false; end
+        return a.digs > b.digs;
+    end);
+    return rows;
+end
+
+local function render_zone_table(zones, id_suffix)
+    local rows = zone_rows(zones);
+    if (#rows == 0) then
+        imgui.TextColored(GRAY, '(no zone data)');
+        return;
+    end
+
+    imgui.Columns(6, '##zones_' .. id_suffix, true);
+    imgui.SetColumnWidth(0, 132);
+    imgui.SetColumnWidth(1, 46);
+    imgui.SetColumnWidth(2, 46);
+    imgui.SetColumnWidth(3, 52);
+    imgui.SetColumnWidth(4, 64);
+    imgui.TextColored(GOLD, 'Zone');   imgui.NextColumn();
+    imgui.TextColored(GOLD, 'Digs');   imgui.NextColumn();
+    imgui.TextColored(GOLD, 'Items');  imgui.NextColumn();
+    imgui.TextColored(GOLD, 'Acc');    imgui.NextColumn();
+    imgui.TextColored(GOLD, 'Net');    imgui.NextColumn();
+    imgui.TextColored(GOLD, 'Gil/hr'); imgui.NextColumn();
+    imgui.Separator();
+
+    for _, r in ipairs(rows) do
+        imgui.Text(r.name);
+        if (imgui.IsItemHovered()) then
+            imgui.SetTooltip(string.format(
+                '%s\nDigs %d, items %d (%.1f%% accuracy)\nItem value %sg, net %sg\nTime digging here: %s',
+                r.name, r.digs, r.items, r.acc, format_int(r.value), format_int(r.net),
+                format_time(r.seconds)));
+        end
+        imgui.NextColumn();
+        imgui.Text(format_int(r.digs));                    imgui.NextColumn();
+        imgui.Text(format_int(r.items));                   imgui.NextColumn();
+        imgui.Text(string.format('%.0f%%', r.acc));        imgui.NextColumn();
+        imgui.TextColored(r.net >= 0 and GREEN or RED, format_int(r.net)); imgui.NextColumn();
+        if (r.gph ~= nil) then
+            imgui.TextColored(CYAN, format_int(r.gph));
+        else
+            imgui.TextColored(GRAY, '-');
+            if (imgui.IsItemHovered()) then
+                imgui.SetTooltip('Under a minute of digging here - too little to rate.');
+            end
+        end
+        imgui.NextColumn();
+    end
+    imgui.Columns(1);
+end
+
+-- Merges every session's zone buckets into one all-time table.
+local function all_time_zones(dates)
+    local merged = { };
+    for _, date in ipairs(dates) do
+        local d = load_detail(date);
+        if (d ~= nil and d.zones ~= nil) then
+            for id, z in pairs(d.zones) do
+                local m = merged[id];
+                if (m == nil) then
+                    merged[id] = { id = id, digs = z.digs, items = z.items, value = z.value,
+                                   rentals = z.rentals, seconds = z.seconds };
+                else
+                    m.digs = m.digs + z.digs;
+                    m.items = m.items + z.items;
+                    m.value = m.value + z.value;
+                    m.rentals = m.rentals + z.rentals;
+                    m.seconds = m.seconds + z.seconds;
+                end
+            end
+        end
+    end
+    return merged;
+end
+
+------------------------------------------------------------
 -- Session browser: rendering
 ------------------------------------------------------------
 local METRICS = {
@@ -1114,6 +1266,10 @@ local function render_session_detail(s)
     -- Timeline graphs from the event stream.
     local d = load_detail(s.date);
     if (d ~= nil) then
+        if (d.zones ~= nil and next(d.zones) ~= nil) then
+            imgui.TextColored(GOLD, 'By zone');
+            render_zone_table(d.zones, s.date);
+        end
         imgui.TextColored(GOLD, 'Digs by hour (JST)');
         local hours = T{ };
         for h = 0, 23 do
@@ -1202,6 +1358,16 @@ local function render_sessions_browser()
             });
         end
         draw_bars(entries, 80);
+
+        -- All-time zone comparison. Collapsed by default because it has to
+        -- read every day's event stream to build.
+        imgui.Separator();
+        if (imgui.CollapsingHeader('Zones (all-time)###zones_all')) then
+            local dates = T{ };
+            for _, s in ipairs(all) do dates:append(s.date); end
+            render_zone_table(all_time_zones(dates), 'alltime');
+            imgui.TextColored(GRAY, 'Gil/hr uses time actually spent digging in each zone.');
+        end
 
         -- Individual sessions, newest first.
         imgui.Separator();

@@ -41,6 +41,13 @@ To load it automatically, add `/addon load hgather` to
 - **Session browser** (`/hgather sessions`) — all-time totals, a switchable bar
   chart across sessions (Net / Value / Digs / Items / Acc% / Chocobo gil), and
   per-session detail with a digs-by-hour histogram and a cumulative net-gil line.
+- **Zone breakdown.** Every dig records the zone it happened in, so each session
+  shows a per-zone table — digs, items, accuracy, net gil, and gil/hr — and a
+  "Zones (all-time)" section compares every zone you have ever dug in, sorted by
+  gil/hr. Only the gap between two consecutive digs *in the same zone* counts as
+  time spent there, and gaps over 3 minutes are treated as breaks, so travel and
+  AFK never inflate a zone's rate. Zones with under a minute of digging show
+  `-` rather than a rate built on nothing.
 - **Data on disk**, under `addons/hgather/data/<Character>/`:
   - `YYYY-MM-DD.jsonl` — append-only event stream; one JSON object per line,
     each dig carrying zone, moon phase and percent, Vana'diel weekday, weather,
