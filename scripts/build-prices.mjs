@@ -38,14 +38,25 @@ function pickPrice(f) {
   return f.medianSingle ?? f.singlePrice ?? f.stackUnitPrice ?? f.npcSellPrice ?? null;
 }
 
-const url = `${API}?itemIds=${ids.join(',')}`;
-const res = await fetch(url, { headers: { 'user-agent': 'hgather-price-publisher' } });
-if (!res.ok) {
-  console.error(`Upstream returned ${res.status}. Leaving the existing snapshot in place.`);
+// Never let the upstream URL reach stdout/stderr: on a public repository the
+// Actions log is world-readable, and a raw fetch stack trace would carry the
+// host. Errors are reported by class only.
+let payload;
+try {
+  const res = await fetch(`${API}?itemIds=${ids.join(',')}`, {
+    headers: { 'user-agent': 'hgather-price-publisher' },
+  });
+  if (!res.ok) {
+    console.error(`Upstream returned ${res.status}. Leaving the existing snapshot in place.`);
+    process.exit(1);
+  }
+  payload = await res.json();
+} catch (err) {
+  console.error(`Upstream request failed (${err?.name ?? 'Error'}). Leaving the existing snapshot in place.`);
   process.exit(1);
 }
 
-const { prices } = await res.json();
+const { prices } = payload;
 if (!prices || typeof prices !== 'object') {
   console.error('Upstream response had no prices object. Aborting.');
   process.exit(1);
