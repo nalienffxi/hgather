@@ -112,6 +112,36 @@ Until the secret exists the workflow fails fast and changes nothing, so the
 committed snapshot stays as-is — the addon keeps working, the numbers just stop
 moving.
 
+## Notes for future edits
+
+Behaviours that are easy to "fix" back into bugs:
+
+- `default_settings.item_index` is deliberately **empty**. Ashita's settings
+  loader merges defaults into the saved table per array index, so a non-empty
+  default re-injects its own entries into any shorter saved list on every load,
+  reload, and character switch — measured at 31 of 40 fetched prices reset to
+  the `:123` placeholder. The seed list is applied once, on first run, by
+  `seed_item_index()`. Upstream HGather has this bug.
+- For the same reason, changing a default does nothing for existing installs.
+  Upgrades need an explicit step in `migrate_settings()`, keyed off
+  `settings_version` — whose default stays at `1` on purpose, since a default of
+  `2` would make an unmigrated file look already-migrated.
+- `ashita.memory.find` returns `0`, not `nil`, when a signature scan fails, and
+  the world-clock pointer is `0` before the game world exists. Both are checked
+  before every dereference in `get_vana_timestamp` / `get_weather`.
+- The per-day graphs bake prices and the greens setting into their curves, so
+  anything that changes either must clear `hgather.browser.details`.
+- Zone time only accrues between consecutive digs in the same zone, capped at
+  180s. Widening that to "first dig to last dig" would silently bill travel and
+  AFK to whichever zone you happened to be standing in.
+- Ashita ships no `encoding` library in `libs` (the ShiftJIS helper other addons
+  use lives inside their own folders). Digging zone names are ASCII, so none is
+  needed — don't add a `require` for one.
+
+There is no Lua interpreter needed to check work: `pip install luaparser` gives
+a syntax gate, and `pip install lupa` runs the pure logic (disk parsing, price
+and zone aggregation, settings-merge behaviour) headlessly against fixtures.
+
 ## Credits
 
 Original HGather by Hastega (SlowedHaste), building on atom0s' equipmon.
