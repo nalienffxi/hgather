@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "generated_at": 1786179622,
+ "generated_at": 1786182851,
  "item_count": 140,
  "note": "Per-unit gil values for chocobo dig yields, keyed by FFXI item id.",
  "items": {
@@ -85,7 +85,7 @@
   "936": 34,
   "938": 9,
   "942": 16834,
-  "1188": 40,
+  "1188": 39,
   "1193": 5000,
   "1236": 500,
   "1237": 584,
